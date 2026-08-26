@@ -36,4 +36,5 @@ if [ ! -f "$WP_CONFIG" ]; then
   chown www-data:www-data "$WP_CONFIG"
 fi
 
+echo "wp-config ready, starting apache"
 exec docker-php-entrypoint "$@"

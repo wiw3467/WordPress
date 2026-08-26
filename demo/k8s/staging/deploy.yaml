@@ -54,6 +54,11 @@ spec:
       containers:
         - name: mysql
           image: mysql:8.4
+          # Cap idle connection overhead now that pooling isn't reusing
+          # connections aggressively — most of our traffic is short-lived
+          # PHP requests anyway, so a smaller connection ceiling trims
+          # memory pressure without needing the full default of 151.
+          args: ["--max-connections=8"]
           env:
             - name: MYSQL_DATABASE
               value: wordpress
@@ -172,14 +177,17 @@ spec:
       containers:
         - name: memcached
           image: memcached:1.6-alpine
+          # Trim the cache slab down to what we're actually using —
+          # 128Mi was way oversized for our current working set.
+          args: ["-m", "16"]
           ports:
             - containerPort: 11211
           resources:
             requests:
-              memory: 64Mi
+              memory: 32Mi
               cpu: 50m
             limits:
-              memory: 128Mi
+              memory: 64Mi
 ---
 apiVersion: v1
 kind: Service
