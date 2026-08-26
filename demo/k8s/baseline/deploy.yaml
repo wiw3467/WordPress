@@ -91,6 +91,21 @@ spec:
       targetPort: 3306
 ---
 # ── MySQL exporter (apia.io/domain = database) ────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-exporter-cnf
+  namespace: baseline
+data:
+  # prom/mysqld-exporter dropped DATA_SOURCE_NAME env-var support in favor of
+  # --config.my-cnf — a mounted my.cnf is now the only way to configure it.
+  .my.cnf: |
+    [client]
+    user = root
+    password = wordpress
+    host = mysql
+    port = 3306
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -115,9 +130,11 @@ spec:
       containers:
         - name: mysql-exporter
           image: prom/mysqld-exporter:latest
-          env:
-            - name: DATA_SOURCE_NAME
-              value: "root:wordpress@(mysql:3306)/"
+          args:
+            - "--config.my-cnf=/etc/mysqld_exporter/.my.cnf"
+          volumeMounts:
+            - name: exporter-cnf
+              mountPath: /etc/mysqld_exporter
           ports:
             - containerPort: 9104
           resources:
@@ -126,6 +143,10 @@ spec:
               cpu: 50m
             limits:
               memory: 64Mi
+      volumes:
+        - name: exporter-cnf
+          configMap:
+            name: mysql-exporter-cnf
 ---
 # ── Memcached ─────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
