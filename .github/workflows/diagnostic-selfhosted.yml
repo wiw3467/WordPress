@@ -1,0 +1,8 @@
+name: Diagnostic Test Self-Hosted
+on:
+  workflow_dispatch:
+jobs:
+  hello:
+    runs-on: self-hosted
+    steps:
+      - run: echo "hello from self-hosted runner"
