@@ -67,10 +67,13 @@ spec:
             - containerPort: 3306
           resources:
             requests:
-              memory: 256Mi
+              memory: 512Mi
               cpu: 100m
             limits:
-              memory: 512Mi
+              # 512Mi caused OOMKills under 25 VUs of real load (measured
+              # actual usage: 947Mi) — MySQL's per-connection buffers plus
+              # InnoDB's default footprint need more room than Postgres did.
+              memory: 1536Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/mysql
@@ -269,7 +272,11 @@ spec:
               memory: 256Mi
               cpu: 100m
             limits:
-              memory: 512Mi
+              # 512Mi caused OOMKills under 25 VUs (measured actual usage:
+              # 884Mi) — Apache's prefork MPM spawns a full OS process per
+              # concurrent request, each loading the entire PHP interpreter
+              # and WordPress core, unlike a single compiled Go binary.
+              memory: 1280Mi
 ---
 apiVersion: v1
 kind: Service
