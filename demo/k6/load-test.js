@@ -126,6 +126,13 @@ function runTest(baseURL) {
 // Auth (regular password, via the bundled mu-plugin) used for REST API
 // writes below.
 function login(baseURL, username, password) {
+  // WordPress sets a wordpress_test_cookie on GET and requires it echoed
+  // back on the login POST, to confirm the client accepts cookies at all —
+  // skip this and login always fails with "Cookies are blocked" regardless
+  // of valid credentials (confirmed by hand). Real browsers get this cookie
+  // for free by loading the login page before submitting it.
+  http.get(`${baseURL}/wp-login.php`, { timeout: '10s' });
+
   const loginRes = http.post(`${baseURL}/wp-login.php`, {
     log: username,
     pwd: password,
@@ -172,8 +179,12 @@ function anonymousJourney(baseURL) {
     });
     sleep(0.5);
 
-    // REST API — list published posts
-    check(http.get(`${baseURL}/wp-json/wp/v2/posts?per_page=10`, { timeout: '10s' }), {
+    // REST API — list published posts. Uses the ?rest_route= query-var form,
+    // not the pretty /wp-json/ path — a fresh install defaults to Plain
+    // permalinks and the base php:8.3-apache image has no AllowOverride set,
+    // so .htaccess-based rewrites (which /wp-json/ depends on) never take
+    // effect. ?rest_route= is core's own always-available fallback.
+    check(http.get(`${baseURL}/?rest_route=/wp/v2/posts&per_page=10`, { timeout: '10s' }), {
       'api posts 200': (r) => r.status === 200,
     });
     sleep(1);
@@ -214,10 +225,17 @@ function authenticatedJourney(baseURL) {
     sleep(0.5);
 
     group('api me', () => {
-      check(http.get(`${baseURL}/wp-json/wp/v2/users/me`, {
+      check(http.get(`${baseURL}/?rest_route=/wp/v2/users/me`, {
         headers: {
           Authorization: `Basic ${encoding.b64encode(user + ':' + pass)}`,
         },
+        // A fresh, empty jar — this VU's login() above left real WordPress
+        // session cookies in the default jar, and if those get attached
+        // here too, WP's cookie-auth path wins over Basic Auth and demands
+        // an X-WP-Nonce we don't send, causing a 401 on any endpoint that
+        // actually enforces auth (confirmed by hand: /users/me 401s with
+        // stale cookies + Basic Auth, even though Basic Auth alone works).
+        jar: new http.CookieJar(),
         timeout: '10s',
       }), {
         'api me 200': (r) => r.status === 200,
@@ -226,10 +244,11 @@ function authenticatedJourney(baseURL) {
     sleep(0.5);
 
     group('api posts mine', () => {
-      check(http.get(`${baseURL}/wp-json/wp/v2/posts?per_page=10&status=publish`, {
+      check(http.get(`${baseURL}/?rest_route=/wp/v2/posts&per_page=10&status=publish`, {
         headers: {
           Authorization: `Basic ${encoding.b64encode(user + ':' + pass)}`,
         },
+        jar: new http.CookieJar(),
         timeout: '10s',
       }), {
         'api posts auth 200': (r) => r.status === 200,
@@ -250,24 +269,34 @@ function authenticatedJourney(baseURL) {
 
 // Write-heavy journey — creates a comment on an existing post and a new
 // draft post, under a randomly picked user against a randomly picked post,
-// so writes land on varied rows too. Uses Application Password auth (Basic
-// Auth), same shape as gitea's authHeaders pattern.
+// so writes land on varied rows too. Uses Basic Auth via the seeded user's
+// regular password (mu-plugins/basic-auth.php), same shape as gitea's
+// authHeaders pattern.
 function writeJourney(baseURL) {
   group('write', () => {
     const { user, pass } = pickUser();
     const postId = pickPostId();
-    const authHeaders = {
-      Authorization: `Basic ${encoding.b64encode(user + ':' + pass)}`,
-      'Content-Type': 'application/json',
+    // Fresh, empty jar — this VU may have run authenticatedJourney's login()
+    // in a prior iteration (VU cookie jars persist across iterations, not
+    // just within one), and a leftover session cookie makes WP's cookie-auth
+    // path win over Basic Auth and demand a nonce we don't send. See the
+    // same note in authenticatedJourney's 'api me' group.
+    const authParams = {
+      headers: {
+        Authorization: `Basic ${encoding.b64encode(user + ':' + pass)}`,
+        'Content-Type': 'application/json',
+      },
+      jar: new http.CookieJar(),
+      timeout: '10s',
     };
 
     sleep(0.3);
 
     group('create comment', () => {
       const n = Math.floor(Math.random() * 10000);
-      check(http.post(`${baseURL}/wp-json/wp/v2/comments`,
+      check(http.post(`${baseURL}/?rest_route=/wp/v2/comments`,
         JSON.stringify({ post: postId, content: `Load-test comment ${n} from ${user}.` }),
-        { headers: authHeaders, timeout: '10s' }), {
+        authParams), {
         'create comment 201': (r) => r.status === 201,
       });
     });
@@ -275,9 +304,9 @@ function writeJourney(baseURL) {
 
     group('create draft post', () => {
       const n = Math.floor(Math.random() * 10000);
-      check(http.post(`${baseURL}/wp-json/wp/v2/posts`,
+      check(http.post(`${baseURL}/?rest_route=/wp/v2/posts`,
         JSON.stringify({ title: `Load-test post ${n}`, content: `Created by ${user} during load test.`, status: 'draft' }),
-        { headers: authHeaders, timeout: '10s' }), {
+        authParams), {
         'create post 201': (r) => r.status === 201,
       });
     });

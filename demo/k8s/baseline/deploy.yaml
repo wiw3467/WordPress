@@ -264,18 +264,12 @@ spec:
               value: wordpress
             - name: WORDPRESS_DB_NAME
               value: wordpress
-          volumeMounts:
-            - name: data
-              mountPath: /var/www/html/wp-content
           resources:
             requests:
               memory: 256Mi
               cpu: 100m
             limits:
               memory: 512Mi
-      volumes:
-        - name: data
-          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

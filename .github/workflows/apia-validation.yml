@@ -108,7 +108,10 @@ jobs:
           # install wizard endpoint, same as a browser would POST it. The
           # second user is created via the REST API, authenticated with the
           # first user's regular password over Basic Auth (the bundled
-          # mu-plugins/basic-auth.php dev-only auth handler).
+          # mu-plugins/basic-auth.php dev-only auth handler). REST calls use
+          # ?rest_route= (not the pretty /wp-json/ path) — a fresh install
+          # defaults to Plain permalinks and the base image has no
+          # AllowOverride set, so .htaccess-based rewrites never take effect.
           seed_users() {
             local BASE=$1
             curl -sf --max-time 20 -X POST "$BASE/wp-admin/install.php?step=2" \
@@ -122,9 +125,16 @@ jobs:
               --data-urlencode "Submit=Install WordPress" \
               -o /dev/null || true
 
-            curl -sf --max-time 20 -u "apia-admin:Apia2024!" -X POST "$BASE/wp-json/wp/v2/users" \
+            # editor, not author — an author can only edit its own posts
+            # (403s on the seeded posts, which are all admin-owned) and
+            # lacks moderate_comments, so it hits WP's default one-comment-
+            # per-15s flood control the load test's rapid writes trip
+            # immediately. editor has both edit_others_posts and
+            # moderate_comments, matching what the k6 journeys assume any
+            # authenticated user can do (confirmed both failures by hand).
+            curl -sf --max-time 20 -u "apia-admin:Apia2024!" -X POST "$BASE/?rest_route=/wp/v2/users" \
               -H "Content-Type: application/json" \
-              -d '{"username":"apia-user2","email":"apia-user2@test.local","password":"Apia2024!","roles":["author"]}' \
+              -d '{"username":"apia-user2","email":"apia-user2@test.local","password":"Apia2024!","roles":["editor"]}' \
               -o /dev/null || true
           }
           seed_users http://localhost:30301
@@ -146,7 +156,7 @@ jobs:
             # them so traffic isn't all landing on the exact same row.
             declare -A POST_COMMENTS=( [0]=20 [1]=10 [2]=5 )
             for i in 0 1 2; do
-              RESP=$(curl -sf --max-time 20 -u "$CREDS" -X POST "$BASE/wp-json/wp/v2/posts" \
+              RESP=$(curl -sf --max-time 20 -u "$CREDS" -X POST "$BASE/?rest_route=/wp/v2/posts" \
                 -H "Content-Type: application/json" \
                 -d "{\"title\":\"APIA load test post $i\",\"content\":\"Seeded by APIA load test seeding.\",\"status\":\"publish\"}" \
                 || echo "")
@@ -154,7 +164,7 @@ jobs:
               [ -z "$POST_ID" ] && continue
               IDS="${IDS}${POST_ID},"
               for c in $(seq 1 "${POST_COMMENTS[$i]}"); do
-                curl -sf --max-time 20 -u "$CREDS" -X POST "$BASE/wp-json/wp/v2/comments" \
+                curl -sf --max-time 20 -u "$CREDS" -X POST "$BASE/?rest_route=/wp/v2/comments" \
                   -H "Content-Type: application/json" \
                   -d "{\"post\":$POST_ID,\"content\":\"Test comment $c seeded by APIA.\"}" \
                   -o /dev/null || true
@@ -178,8 +188,8 @@ jobs:
               curl -sf --max-time 5 "$BASE/"                                    -o /dev/null || true
               curl -sf --max-time 5 "$BASE/?s=test"                             -o /dev/null || true
               curl -sf --max-time 5 "$BASE/wp-login.php"                        -o /dev/null || true
-              curl -sf --max-time 5 "$BASE/wp-json/wp/v2/posts?per_page=10"     -o /dev/null || true
-              curl -sf --max-time 5 -u "$CREDS" "$BASE/wp-json/wp/v2/users/me"  -o /dev/null || true
+              curl -sf --max-time 5 "$BASE/?rest_route=/wp/v2/posts&per_page=10"     -o /dev/null || true
+              curl -sf --max-time 5 -u "$CREDS" "$BASE/?rest_route=/wp/v2/users/me"  -o /dev/null || true
             done
           }
           echo "Warming up both environments for 90s..."
