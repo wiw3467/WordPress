@@ -267,6 +267,8 @@ spec:
               value: wordpress
             - name: WORDPRESS_DB_NAME
               value: wordpress
+            - name: WORDPRESS_MEMCACHED_HOST
+              value: memcached:11211
           resources:
             requests:
               memory: 256Mi
