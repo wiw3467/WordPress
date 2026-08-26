@@ -1,0 +1,272 @@
+# baseline namespace — WordPress with MySQL + Memcached ENABLED (healthy reference state)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: baseline
+---
+# ── RBAC — lets the network agent (N8N, monitoring/default SA) read
+# pod/deployment/service readiness in this namespace for regression checks ────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: apia-network-agent-reader
+  namespace: baseline
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: apia-network-agent-reader-binding
+  namespace: baseline
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: monitoring
+roleRef:
+  kind: Role
+  name: apia-network-agent-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+# ── MySQL ─────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: baseline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      nodeSelector:
+        apia-role: baseline
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          env:
+            - name: MYSQL_DATABASE
+              value: wordpress
+            - name: MYSQL_USER
+              value: wordpress
+            - name: MYSQL_PASSWORD
+              value: wordpress
+            - name: MYSQL_ROOT_PASSWORD
+              value: wordpress
+          ports:
+            - containerPort: 3306
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: baseline
+spec:
+  selector:
+    app: mysql
+  ports:
+    - port: 3306
+      targetPort: 3306
+---
+# ── MySQL exporter (apia.io/domain = database) ────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-exporter
+  namespace: baseline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql-exporter
+  template:
+    metadata:
+      labels:
+        app: mysql-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9104"
+        apia.io/domain: "database"
+    spec:
+      nodeSelector:
+        apia-role: baseline
+      containers:
+        - name: mysql-exporter
+          image: prom/mysqld-exporter:latest
+          env:
+            - name: DATA_SOURCE_NAME
+              value: "root:wordpress@(mysql:3306)/"
+          ports:
+            - containerPort: 9104
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 50m
+            limits:
+              memory: 64Mi
+---
+# ── Memcached ─────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memcached
+  namespace: baseline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: memcached
+  template:
+    metadata:
+      labels:
+        app: memcached
+    spec:
+      nodeSelector:
+        apia-role: baseline
+      containers:
+        - name: memcached
+          image: memcached:1.6-alpine
+          ports:
+            - containerPort: 11211
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 50m
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: memcached
+  namespace: baseline
+spec:
+  selector:
+    app: memcached
+  ports:
+    - port: 11211
+      targetPort: 11211
+---
+# ── Memcached exporter (apia.io/domain = cache) ───────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memcached-exporter
+  namespace: baseline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: memcached-exporter
+  template:
+    metadata:
+      labels:
+        app: memcached-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9150"
+        apia.io/domain: "cache"
+    spec:
+      nodeSelector:
+        apia-role: baseline
+      containers:
+        - name: memcached-exporter
+          image: prom/memcached-exporter:latest
+          args:
+            - "--memcached.address=memcached:11211"
+          ports:
+            - containerPort: 9150
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 50m
+            limits:
+              memory: 64Mi
+---
+# ── WordPress app (apia.io/domain = backend) ──────────────────────────────────
+# Note: unlike Gitea (GITEA__metrics__ENABLED gives it a native /metrics
+# endpoint), WordPress has no built-in Prometheus exporter — so the shared
+# generic-exporter-metric-agent's comparison portion will correctly report
+# "no exporter found for domain=backend" here. backend_agent's own K6 +
+# app-log LLM analysis checks are independent of that and work normally.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: baseline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: app
+  template:
+    metadata:
+      labels:
+        app: app
+    spec:
+      nodeSelector:
+        apia-role: baseline
+      containers:
+        - name: app
+          image: k3d-apia-registry:5000/wordpress:baseline
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          env:
+            - name: WORDPRESS_DB_HOST
+              value: mysql:3306
+            - name: WORDPRESS_DB_USER
+              value: wordpress
+            - name: WORDPRESS_DB_PASSWORD
+              value: wordpress
+            - name: WORDPRESS_DB_NAME
+              value: wordpress
+          volumeMounts:
+            - name: data
+              mountPath: /var/www/html/wp-content
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-svc
+  namespace: baseline
+spec:
+  type: NodePort
+  selector:
+    app: app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30301
