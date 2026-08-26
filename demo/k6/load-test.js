@@ -13,13 +13,13 @@ const RAMPDOWN_S = parseInt(__ENV.RAMPDOWN_S || '30',  10);
 const VUS        = parseInt(__ENV.VUS        || '25',  10);
 
 // Test credentials — seeded by the CI "Seed test data" step, not k6 itself.
-// APP_PASSWORD is a WordPress Application Password (core feature since 5.6),
-// generated during seeding via the REST API after a cookie-authenticated
-// session — needed because write requests here use Basic Auth, same pattern
-// as gitea's script, not cookie+nonce the way a real browser session would.
+// REST API writes below authenticate with these same regular passwords via
+// Basic Auth, handled by the JSON Basic Authentication mu-plugin bundled in
+// the image (mu-plugins/basic-auth.php) — a dev/debug-only auth handler
+// from the WordPress REST API team's own repo, avoiding the cookie+nonce
+// dance a real browser session would need just to authenticate a script.
 const ADMIN_USER    = 'apia-admin';
 const ADMIN_PASS    = 'Apia2024!';
-const APP_PASSWORD   = __ENV.WP_APP_PASSWORD || '';
 const SECOND_USER   = 'apia-user2';
 const SECOND_PASS   = 'Apia2024!';
 const USERS = [
@@ -104,11 +104,11 @@ export const options = {
   },
 };
 
-// Test data (posts, comments, the admin's Application Password) is seeded by
-// a dedicated CI step before k6 runs, via WordPress's install wizard + REST
-// API over curl (no WP-CLI — see session notes) — not in a k6 setup() here,
-// so a slow/failed seed fails its own step with a clear error instead of
-// corrupting the measurement window.
+// Test data (posts, comments, both users) is seeded by a dedicated CI step
+// before k6 runs, via WordPress's install wizard + REST API over curl (no
+// WP-CLI — see session notes) — not in a k6 setup() here, so a slow/failed
+// seed fails its own step with a clear error instead of corrupting the
+// measurement window.
 
 function runTest(baseURL) {
   const r = Math.random();
@@ -122,8 +122,9 @@ function runTest(baseURL) {
 }
 
 // Cookie login via wp-login.php — used for wp-admin page views, mirroring
-// how a real logged-in user browses the dashboard. Separate from the
-// Application Password used for REST API writes below.
+// how a real logged-in user browses the dashboard. Separate from the Basic
+// Auth (regular password, via the bundled mu-plugin) used for REST API
+// writes below.
 function login(baseURL, username, password) {
   const loginRes = http.post(`${baseURL}/wp-login.php`, {
     log: username,
@@ -215,7 +216,7 @@ function authenticatedJourney(baseURL) {
     group('api me', () => {
       check(http.get(`${baseURL}/wp-json/wp/v2/users/me`, {
         headers: {
-          Authorization: `Basic ${encoding.b64encode(user + ':' + APP_PASSWORD)}`,
+          Authorization: `Basic ${encoding.b64encode(user + ':' + pass)}`,
         },
         timeout: '10s',
       }), {
@@ -227,7 +228,7 @@ function authenticatedJourney(baseURL) {
     group('api posts mine', () => {
       check(http.get(`${baseURL}/wp-json/wp/v2/posts?per_page=10&status=publish`, {
         headers: {
-          Authorization: `Basic ${encoding.b64encode(user + ':' + APP_PASSWORD)}`,
+          Authorization: `Basic ${encoding.b64encode(user + ':' + pass)}`,
         },
         timeout: '10s',
       }), {
@@ -253,10 +254,10 @@ function authenticatedJourney(baseURL) {
 // Auth), same shape as gitea's authHeaders pattern.
 function writeJourney(baseURL) {
   group('write', () => {
-    const { user } = pickUser();
+    const { user, pass } = pickUser();
     const postId = pickPostId();
     const authHeaders = {
-      Authorization: `Basic ${encoding.b64encode(user + ':' + APP_PASSWORD)}`,
+      Authorization: `Basic ${encoding.b64encode(user + ':' + pass)}`,
       'Content-Type': 'application/json',
     };
 

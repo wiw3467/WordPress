@@ -1,0 +1,248 @@
+name: APIA Performance Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  apia-validate:
+    runs-on: self-hosted
+    timeout-minutes: 60
+    env:
+      APIA_HOME: ${{ secrets.APIA_HOME }}
+
+    steps:
+      - name: Put Git Bash first in PATH
+        run: echo "C:\Program Files\Git\bin" >> $env:GITHUB_PATH
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set image tag
+        id: tag
+        shell: bash
+        run: echo "SHA=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build or retag WordPress image
+        shell: bash
+        run: |
+          SHA=${{ steps.tag.outputs.SHA }}
+          # WordPress's default branch is master, not main (confirmed via
+          # both this fork and upstream WordPress/WordPress).
+          git fetch origin master --depth=1 || true
+          MASTER_SHA=$(git rev-parse --short=8 FETCH_HEAD)
+
+          # Baseline image: always built from master, cached by master SHA
+          if ! docker image inspect localhost:5000/wordpress:baseline-${MASTER_SHA} &>/dev/null; then
+            echo "Building baseline image from master (${MASTER_SHA})..."
+            git worktree add /tmp/baseline-src FETCH_HEAD 2>/dev/null || git worktree add /tmp/baseline-src FETCH_HEAD --force
+            docker build -t localhost:5000/wordpress:baseline-${MASTER_SHA} -t localhost:5000/wordpress:baseline /tmp/baseline-src
+            docker push localhost:5000/wordpress:baseline-${MASTER_SHA}
+            docker push localhost:5000/wordpress:baseline
+            git worktree remove /tmp/baseline-src --force
+          else
+            echo "Baseline image up to date (${MASTER_SHA}) - skipping build"
+            docker tag localhost:5000/wordpress:baseline-${MASTER_SHA} localhost:5000/wordpress:baseline
+            docker push localhost:5000/wordpress:baseline
+          fi
+
+          # Staging image: always built fresh from the PR branch
+          echo "Building staging image from PR branch (${SHA})..."
+          docker build -t localhost:5000/wordpress:staging .
+          docker push localhost:5000/wordpress:staging
+
+      - name: Compute git diff
+        shell: bash
+        run: |
+          git fetch origin master --depth=1 2>/dev/null || true
+          git diff FETCH_HEAD HEAD -- . > "$RUNNER_TEMP/pr-diff.patch" 2>/dev/null || touch "$RUNNER_TEMP/pr-diff.patch"
+          echo "GIT_DIFF_FILE=$RUNNER_TEMP/pr-diff.patch" >> $GITHUB_ENV
+
+      - name: Reset baseline and deploy staging in parallel
+        shell: bash
+        run: |
+          kubectl delete namespace baseline --ignore-not-found=true &
+          kubectl delete namespace staging --ignore-not-found=true &
+          wait
+
+          # Baseline: always from master's demo/k8s/baseline/deploy.yaml (permanent healthy reference)
+          git show origin/master:demo/k8s/baseline/deploy.yaml | kubectl apply -f -
+
+          # Staging: demo/k8s/staging/deploy.yaml from the PR branch.
+          kubectl apply -f demo/k8s/staging/deploy.yaml
+
+          kubectl rollout status deployment/mysql -n baseline --timeout=90s &
+          kubectl rollout status deployment/mysql -n staging --timeout=90s &
+          wait
+
+          kubectl rollout status deployment/memcached -n baseline --timeout=60s
+
+          # memcached in staging only exists if the PR's staging.yaml includes it
+          kubectl rollout status deployment/memcached -n staging --timeout=60s 2>/dev/null || true
+
+          kubectl rollout status deployment/app -n baseline --timeout=180s &
+          kubectl rollout status deployment/app -n staging --timeout=180s &
+          wait
+
+      - name: Wait for both environments to serve traffic
+        shell: bash
+        run: |
+          for i in $(seq 1 30); do
+            BASELINE_OK=false
+            STAGING_OK=false
+            curl -sf http://localhost:30301/ > /dev/null 2>&1 && BASELINE_OK=true
+            curl -sf http://localhost:30302/ > /dev/null 2>&1 && STAGING_OK=true
+            if $BASELINE_OK && $STAGING_OK; then
+              echo "Both environments ready"; break
+            fi
+            echo "Waiting... baseline=$BASELINE_OK staging=$STAGING_OK ($i/30)"
+            sleep 10
+          done
+
+      - name: Seed WordPress admin + second user on both environments
+        shell: bash
+        run: |
+          # No WP-CLI (see session notes) — install via WordPress's own
+          # install wizard endpoint, same as a browser would POST it. The
+          # second user is created via the REST API, authenticated with the
+          # first user's regular password over Basic Auth (the bundled
+          # mu-plugins/basic-auth.php dev-only auth handler).
+          seed_users() {
+            local BASE=$1
+            curl -sf --max-time 20 -X POST "$BASE/wp-admin/install.php?step=2" \
+              --data-urlencode "weblog_title=APIA Test Site" \
+              --data-urlencode "user_name=apia-admin" \
+              --data-urlencode "admin_password=Apia2024!" \
+              --data-urlencode "admin_password2=Apia2024!" \
+              --data-urlencode "admin_email=apia@test.local" \
+              --data-urlencode "blog_public=0" \
+              --data-urlencode "pw_weak=1" \
+              --data-urlencode "Submit=Install WordPress" \
+              -o /dev/null || true
+
+            curl -sf --max-time 20 -u "apia-admin:Apia2024!" -X POST "$BASE/wp-json/wp/v2/users" \
+              -H "Content-Type: application/json" \
+              -d '{"username":"apia-user2","email":"apia-user2@test.local","password":"Apia2024!","roles":["author"]}' \
+              -o /dev/null || true
+          }
+          seed_users http://localhost:30301
+          seed_users http://localhost:30302
+
+      - name: Seed test data on both environments
+        shell: bash
+        run: |
+          # Moved out of k6's setup() — same reasoning as gitea's script: a
+          # slow/failed seed fails its own step with a clear error instead
+          # of corrupting the measurement window.
+          seed_data() {
+            local BASE=$1
+            local OUT_VAR=$2
+            local CREDS="apia-admin:Apia2024!"
+            local IDS=""
+            # Three posts with different pre-seeded comment counts, instead
+            # of one shared post — the k6 write/read journeys pick among
+            # them so traffic isn't all landing on the exact same row.
+            declare -A POST_COMMENTS=( [0]=20 [1]=10 [2]=5 )
+            for i in 0 1 2; do
+              RESP=$(curl -sf --max-time 20 -u "$CREDS" -X POST "$BASE/wp-json/wp/v2/posts" \
+                -H "Content-Type: application/json" \
+                -d "{\"title\":\"APIA load test post $i\",\"content\":\"Seeded by APIA load test seeding.\",\"status\":\"publish\"}" \
+                || echo "")
+              POST_ID=$(echo "$RESP" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
+              [ -z "$POST_ID" ] && continue
+              IDS="${IDS}${POST_ID},"
+              for c in $(seq 1 "${POST_COMMENTS[$i]}"); do
+                curl -sf --max-time 20 -u "$CREDS" -X POST "$BASE/wp-json/wp/v2/comments" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"post\":$POST_ID,\"content\":\"Test comment $c seeded by APIA.\"}" \
+                  -o /dev/null || true
+              done
+            done
+            echo "$OUT_VAR=${IDS%,}" >> $GITHUB_ENV
+          }
+          seed_data http://localhost:30301 WP_BASELINE_POST_IDS &
+          seed_data http://localhost:30302 WP_STAGING_POST_IDS &
+          wait
+          echo "Seeding complete"
+
+      - name: Warm up both environments
+        shell: bash
+        run: |
+          warmup() {
+            local BASE=$1
+            local END=$(( $(date +%s) + 90 ))
+            local CREDS="apia-admin:Apia2024!"
+            while [ "$(date +%s)" -lt "$END" ]; do
+              curl -sf --max-time 5 "$BASE/"                                    -o /dev/null || true
+              curl -sf --max-time 5 "$BASE/?s=test"                             -o /dev/null || true
+              curl -sf --max-time 5 "$BASE/wp-login.php"                        -o /dev/null || true
+              curl -sf --max-time 5 "$BASE/wp-json/wp/v2/posts?per_page=10"     -o /dev/null || true
+              curl -sf --max-time 5 -u "$CREDS" "$BASE/wp-json/wp/v2/users/me"  -o /dev/null || true
+            done
+          }
+          echo "Warming up both environments for 90s..."
+          warmup http://localhost:30301 &
+          warmup http://localhost:30302 &
+          wait
+          echo "Warmup complete"
+
+      - name: Run K6 load test
+        shell: bash
+        env:
+          K6_STAGE_WARMUP: 60
+          K6_STAGE_RAMPUP: 30
+          K6_STAGE_MEASURE: 120
+          K6_STAGE_RAMPDOWN: 30
+          K6_VUS: 25
+        run: |
+          K6_START_TS=$(date +%s)
+          # Staging's own post IDs drive the traffic since k6's staging
+          # scenario hits STAGING_URL; baseline's own IDs aren't needed
+          # here since k6's baseline scenario has its own pool via
+          # WP_TEST_POST_IDS applying identically to whichever URL each
+          # scenario targets.
+          k6 run demo/k6/load-test.js \
+            --env BASELINE_URL=http://localhost:30301 \
+            --env STAGING_URL=http://localhost:30302 \
+            --env WARMUP_S=$K6_STAGE_WARMUP \
+            --env RAMPUP_S=$K6_STAGE_RAMPUP \
+            --env MEASURE_S=$K6_STAGE_MEASURE \
+            --env RAMPDOWN_S=$K6_STAGE_RAMPDOWN \
+            --env VUS=$K6_VUS \
+            --env WP_TEST_POST_IDS="${WP_STAGING_POST_IDS:-2,3,4}" \
+            --summary-export /tmp/k6-summary.json || true
+          K6_END_TS=$(date +%s)
+
+          echo "K6_RESULT_FILE=/tmp/k6-summary.json" >> $GITHUB_ENV
+          echo "K6_START_TS=$K6_START_TS"            >> $GITHUB_ENV
+          echo "K6_END_TS=$K6_END_TS"                >> $GITHUB_ENV
+          echo "K6_SKIP_START_S=$(( K6_STAGE_WARMUP + K6_STAGE_RAMPUP ))" >> $GITHUB_ENV
+          echo "K6_SKIP_END_S=$K6_STAGE_RAMPDOWN"                          >> $GITHUB_ENV
+          echo "K6_TOTAL_S=$(( K6_STAGE_WARMUP + K6_STAGE_RAMPUP + K6_STAGE_MEASURE + K6_STAGE_RAMPDOWN ))" >> $GITHUB_ENV
+
+      - name: Run APIA pipeline
+        shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          PROMETHEUS_URL: http://localhost:30090
+          LOKI_URL: http://localhost:30100
+          N8N_URL: http://localhost:30678
+          BASELINE_URL: http://localhost:30301
+          STAGING_URL: http://localhost:30302
+          PYTHONIOENCODING: utf-8
+          STAGING_NAMESPACE: staging
+          BASELINE_NAMESPACE: baseline
+          CONTAINER_NAME: app
+          OLLAMA_HOST: host.docker.internal
+          OLLAMA_PORT: "11434"
+          OLLAMA_MODEL: llama3:8b
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python $APIA_HOME/framework/pipeline.py
+
+      - name: Teardown staging
+        if: always()
+        run: kubectl delete namespace staging --ignore-not-found=true

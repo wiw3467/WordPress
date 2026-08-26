@@ -13,6 +13,10 @@ RUN apt-get update && apt-get install -y \
 
 COPY . /var/www/html/
 
+# mu-plugins auto-load with no activation step — CI-only Basic Auth for
+# REST API writes, see mu-plugins/basic-auth.php for why.
+COPY mu-plugins/basic-auth.php /var/www/html/wp-content/mu-plugins/basic-auth.php
+
 # wp-config.php is gitignored (would contain secrets) — generated at
 # container startup from env vars instead, see docker-entrypoint.sh.
 RUN rm -f /var/www/html/wp-config.php \
