@@ -1,0 +1,6 @@
+# Shell scripts must stay LF — CRLF breaks the shebang line inside a Linux
+# container ("bad interpreter" error). Added because this repo is edited
+# from a Windows checkout, where git would otherwise silently convert to
+# CRLF on the next commit.
+*.sh text eol=lf
+Dockerfile text eol=lf
