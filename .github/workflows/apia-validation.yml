@@ -55,9 +55,19 @@ jobs:
 
       - name: Compute git diff
         shell: bash
+        env:
+          # The PR's actual base commit — where this branch diverged from
+          # master — not master's current tip. master can (and did) move
+          # forward with unrelated commits after a PR opens; diffing against
+          # a moving tip picks up that later drift and misattributes it to
+          # this PR (e.g. a later master commit touching
+          # demo/k8s/baseline/deploy.yaml showed up as if this PR changed
+          # it). Fetching this exact SHA pins the comparison to the real
+          # merge-base regardless of what master does afterward.
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          git fetch origin master --depth=1 2>/dev/null || true
-          git diff FETCH_HEAD HEAD -- . > "$RUNNER_TEMP/pr-diff.patch" 2>/dev/null || touch "$RUNNER_TEMP/pr-diff.patch"
+          git fetch origin "$PR_BASE_SHA" --depth=1 2>/dev/null || true
+          git diff "$PR_BASE_SHA" HEAD -- . > "$RUNNER_TEMP/pr-diff.patch" 2>/dev/null || touch "$RUNNER_TEMP/pr-diff.patch"
           echo "GIT_DIFF_FILE=$RUNNER_TEMP/pr-diff.patch" >> $GITHUB_ENV
 
       - name: Reset baseline and deploy staging in parallel
