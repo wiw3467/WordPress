@@ -56,18 +56,32 @@ jobs:
       - name: Compute git diff
         shell: bash
         env:
-          # The PR's actual base commit — where this branch diverged from
-          # master — not master's current tip. master can (and did) move
-          # forward with unrelated commits after a PR opens; diffing against
-          # a moving tip picks up that later drift and misattributes it to
-          # this PR (e.g. a later master commit touching
-          # demo/k8s/baseline/deploy.yaml showed up as if this PR changed
-          # it). Fetching this exact SHA pins the comparison to the real
-          # merge-base regardless of what master does afterward.
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # Fetch the diff straight from GitHub's API instead of computing it
+          # with local git. A prior version used `git diff FETCH_HEAD HEAD`
+          # (wrong — compared against master's moving tip, picking up later,
+          # unrelated master commits), and pinning to
+          # github.event.pull_request.base.sha still produced a wrong diff on
+          # this self-hosted runner: $RUNNER_TEMP resolves to a fixed,
+          # non-unique path here (not a fresh per-run directory like on
+          # hosted runners), and this runner's workspace persists across
+          # jobs, so local shallow-clone state from a previous run can bleed
+          # into the next one's git plumbing. GitHub's own compare/diff for
+          # this PR is authoritative and computed server-side — no local
+          # repo state, no shallow-fetch ambiguity, no workspace reuse to
+          # worry about.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          git fetch origin "$PR_BASE_SHA" --depth=1 2>/dev/null || true
-          git diff "$PR_BASE_SHA" HEAD -- . > "$RUNNER_TEMP/pr-diff.patch" 2>/dev/null || touch "$RUNNER_TEMP/pr-diff.patch"
+          curl -sf -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github.v3.diff" \
+            "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER" \
+            > "$RUNNER_TEMP/pr-diff.patch" 2>/dev/null || true
+          # curl -f makes a failed request produce an empty/short file rather
+          # than an HTML error body; fall back to a guaranteed-empty file so
+          # downstream parsing sees "no changes" instead of garbage.
+          if [ ! -s "$RUNNER_TEMP/pr-diff.patch" ]; then
+            : > "$RUNNER_TEMP/pr-diff.patch"
+          fi
           echo "GIT_DIFF_FILE=$RUNNER_TEMP/pr-diff.patch" >> $GITHUB_ENV
 
       - name: Reset baseline and deploy staging in parallel
