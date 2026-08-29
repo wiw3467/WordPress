@@ -172,14 +172,18 @@ spec:
       containers:
         - name: memcached
           image: memcached:1.6-alpine
+          # -m 8: cap process memory at 8MB — tuned down from 64MB default
+          # to reduce idle memory footprint. Cache will self-evict LRU items
+          # when full rather than growing unbounded.
+          args: ["-m", "8"]
           ports:
             - containerPort: 11211
           resources:
             requests:
-              memory: 64Mi
+              memory: 16Mi
               cpu: 50m
             limits:
-              memory: 128Mi
+              memory: 32Mi
 ---
 apiVersion: v1
 kind: Service
