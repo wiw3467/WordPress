@@ -274,11 +274,10 @@ spec:
               memory: 256Mi
               cpu: 100m
             limits:
-              # 512Mi caused OOMKills under 25 VUs (measured actual usage:
-              # 884Mi) — Apache's prefork MPM spawns a full OS process per
-              # concurrent request, each loading the entire PHP interpreter
-              # and WordPress core, unlike a single compiled Go binary.
-              memory: 1280Mi
+              # Profiling under 25 VUs showed peak at ~600Mi with the new
+              # memory_limit=512M cap — setting 768Mi gives 28% headroom.
+              # Previous 1280Mi was over-provisioned based on old data.
+              memory: 768Mi
 ---
 apiVersion: v1
 kind: Service
