@@ -11,13 +11,19 @@ RUN apt-get update && apt-get install -y \
     && docker-php-ext-install -j"$(nproc)" mysqli gd zip exif \
     && pecl install memcache && docker-php-ext-enable memcache \
     && a2enmod rewrite \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "memory_limit = 512M" > /usr/local/etc/php/conf.d/memory.ini \
+    && printf '<IfModule mpm_prefork_module>\n  MaxRequestWorkers 50\n  ServerLimit 50\n</IfModule>\n' \
+       > /etc/apache2/conf-available/worker-tuning.conf \
+    && a2enconf worker-tuning
 
 COPY . /var/www/html/
 
 # mu-plugins auto-load with no activation step — CI-only Basic Auth for
 # REST API writes, see mu-plugins/basic-auth.php for why.
 COPY mu-plugins/basic-auth.php /var/www/html/wp-content/mu-plugins/basic-auth.php
+COPY mu-plugins/query-optimizer.php /var/www/html/wp-content/mu-plugins/query-optimizer.php
+COPY mu-plugins/object-cache-init.php /var/www/html/wp-content/mu-plugins/object-cache-init.php
 
 # object-cache.php is a WordPress "drop-in", not a plugin — it must live
 # directly in wp-content/ to auto-load, unlike mu-plugins/. This is the real,
