@@ -111,10 +111,12 @@ export const options = {
 // measurement window.
 
 function runTest(baseURL) {
+  // Slightly more anonymous traffic, slightly less write traffic — closer
+  // to what a typical low-write blog actually sees.
   const r = Math.random();
-  if (r < 0.20) {
+  if (r < 0.25) {
     anonymousJourney(baseURL);
-  } else if (r < 0.80) {
+  } else if (r < 0.82) {
     authenticatedJourney(baseURL);
   } else {
     writeJourney(baseURL);
